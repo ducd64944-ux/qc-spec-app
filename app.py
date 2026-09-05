@@ -1,25 +1,27 @@
 """
-app.py — QC Thông số kỹ thuật (QC Spec App)
+app.py — QC Thông số kỹ thuật (QC Spec App), chạy hàng loạt
 
 App Streamlit giúp QC bài viết thông số kỹ thuật sản phẩm (TGDĐ/ĐMX) so với
-spec + ảnh do hãng cung cấp, bằng cách dán 2 link.
+spec + ảnh do hãng cung cấp. Nhập nhiều dòng cùng lúc: ID sản phẩm + link bài
+viết TGDĐ/ĐMX + link trang hãng (nếu có), bấm 1 nút để chạy QC cho tất cả.
+
+Không dùng bảng mapping ID thuộc tính (attribute_mapping.py) — đối chiếu
+trực tiếp bằng fuzzy match tên thuộc tính (matcher.py). Khi không có link
+hãng, chỉ liệt kê TSKT đọc được từ bài viết (không so trạng thái Khớp/Lệch).
 
 Chạy local:  streamlit run app.py
 """
 
 from __future__ import annotations
 
-import os
+import io
 
 import pandas as pd
 import streamlit as st
 
-import attribute_mapping as am
-import matcher
 from image_compare import compare_image_sets
+from matcher import match_specs_fuzzy
 from scraper import scrape_page
-
-APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
 STATUS_COLORS = {
     "Khớp": "#d4edda",
@@ -30,6 +32,8 @@ STATUS_COLORS = {
     "Lỗi tải ảnh": "#e2e3e5",
 }
 
+EMPTY_ROW = {"ID": "", "Link bài viết": "", "Link hãng": ""}
+
 
 def _style_status_column(df: pd.DataFrame, status_col: str = "Trạng thái"):
     def _row_style(row):
@@ -39,201 +43,207 @@ def _style_status_column(df: pd.DataFrame, status_col: str = "Trạng thái"):
 
 
 def _init_session_state():
-    st.session_state.setdefault("mapping_result", None)
-    st.session_state.setdefault("qc_result", None)
+    st.session_state.setdefault("batch_input", pd.DataFrame([EMPTY_ROW]))
+    st.session_state.setdefault("batch_results", None)
 
 
-def _render_mapping_panel():
-    st.subheader("Quản lý mapping thuộc tính")
+def _process_one_product(product_id: str, url_a: str, url_b: str) -> dict:
+    """Cào + đối chiếu 1 sản phẩm. Lỗi ở 1 sản phẩm không được làm hỏng cả
+    lô — luôn trả về dict, lỗi được ghi vào result['error']."""
+    result: dict = {"id": product_id, "url_a": url_a, "url_b": url_b, "error": None}
 
-    default_result = am.load_default_mapping(app_dir=APP_DIR)
+    try:
+        page_a = scrape_page(url_a)
+    except Exception as exc:  # noqa: BLE001
+        result["error"] = f"Lỗi tải bài viết TGDĐ/ĐMX: {exc}"
+        return result
+    result["page_a"] = page_a
 
-    override_file = st.file_uploader(
-        "Override tạm (không lưu vào repo) — upload 1 bản mapping_thuoc_tinh.xlsx khác để thử",
-        type=["xlsx"],
-        key="mapping_override_uploader",
-    )
+    page_b = None
+    if url_b:
+        try:
+            page_b = scrape_page(url_b)
+        except Exception as exc:  # noqa: BLE001
+            result["warning_b"] = f"Lỗi tải trang hãng: {exc}"
+    result["page_b"] = page_b
 
-    if override_file is not None:
-        result = am.load_mapping_from_upload(override_file)
-        if result.ok:
-            st.info("Đang dùng bản mapping override tạm thời (chỉ áp dụng cho lần chạy này).")
+    if page_b is not None:
+        fuzzy_rows = match_specs_fuzzy(page_a.specs, page_b.specs)
+        result["table_rows"] = [{
+            "Thuộc tính (TGDĐ/ĐMX)": r.label_a or "—",
+            "Giá trị (TGDĐ/ĐMX)": r.value_a,
+            "Thuộc tính (Hãng)": r.label_b or "—",
+            "Giá trị (Hãng)": r.value_b,
+            "Trạng thái": r.status,
+        } for r in fuzzy_rows]
+        result["has_comparison"] = True
+
+        images_a, images_b = page_a.images, page_b.images
+        if images_a and images_b:
+            try:
+                result["image_matches"] = compare_image_sets(images_a, images_b)
+            except Exception as exc:  # noqa: BLE001
+                result["image_error"] = str(exc)
     else:
-        result = default_result
+        # Chưa có link hãng -> chỉ liệt kê TSKT đọc được, không so trạng thái
+        result["table_rows"] = [{
+            "Thuộc tính": label, "Giá trị": value,
+        } for label, value in page_a.specs.items()]
+        result["has_comparison"] = False
 
-    if result.ok:
-        st.success(f"Đã đọc mapping: {len(result.dataframe)} dòng — nguồn: {result.source_path}")
-        with st.expander("Xem trước mapping đang dùng"):
-            st.dataframe(result.dataframe, use_container_width=True)
-    else:
-        st.warning(
-            f"Chưa dùng được mapping theo ID ({result.error}). "
-            "App sẽ tạm dùng fuzzy match tên thuộc tính (kém chắc chắn hơn) cho lần chạy này."
-        )
-
-    if default_result.ok:
-        buffer = am.build_updated_mapping_with_suggestions(default_result.dataframe, [])
-        st.download_button(
-            "Tải mapping hiện tại trong repo",
-            data=buffer,
-            file_name="mapping_thuoc_tinh.xlsx",
-            key="download_current_mapping",
-        )
-
-    st.session_state["mapping_result"] = result
     return result
 
 
-def _run_qc(url_dmx: str, url_hang: str, mapping_result: am.MappingLoadResult):
-    with st.spinner("Đang tải và phân tích bài viết TGDĐ/ĐMX..."):
-        page_a = scrape_page(url_dmx)
+def _build_export_workbook(results: list) -> bytes | None:
+    all_rows = []
+    for r in results:
+        if r.get("error"):
+            continue
+        for row in r["table_rows"]:
+            all_rows.append({"ID": r["id"], **row})
+    if not all_rows:
+        return None
 
-    page_b = None
-    if url_hang:
-        with st.spinner("Đang tải và phân tích trang hãng..."):
-            page_b = scrape_page(url_hang)
-
-    for w in page_a.warnings:
-        st.warning(f"[Bài viết TGDĐ/ĐMX] {w}")
-    if page_b:
-        for w in page_b.warnings:
-            st.warning(f"[Trang hãng] {w}")
-
-    specs_b = page_b.specs if page_b else {}
-
-    unmapped: list = []
-    if mapping_result.ok:
-        id_rows, unmapped = am.match_specs_by_id(page_a.specs, specs_b, mapping_result.dataframe)
-        table_rows = [{
-            "ID": r.attribute_id,
-            "Thuộc tính": r.ten_chuan or f"{r.label_a} / {r.label_b}",
-            "Giá trị (TGDĐ/ĐMX)": r.value_a,
-            "Giá trị (Hãng)": r.value_b,
-            "Trạng thái": r.status,
-            "Cách khớp": "ID (chính xác)" if r.match_method == "id_exact" else "ID (fuzzy trong alias)",
-        } for r in id_rows]
-        method_label = "ID mapping"
-    else:
-        fuzzy_rows = matcher.match_specs_fuzzy(page_a.specs, specs_b)
-        table_rows = [{
-            "ID": "",
-            "Thuộc tính": f"{r.label_a or '(?)'} / {r.label_b or '(?)'}",
-            "Giá trị (TGDĐ/ĐMX)": r.value_a,
-            "Giá trị (Hãng)": r.value_b,
-            "Trạng thái": r.status,
-            "Cách khớp": "Fuzzy tên thuộc tính",
-        } for r in fuzzy_rows]
-        method_label = "Fuzzy (chưa có mapping ID)"
-
-    st.session_state["qc_result"] = {
-        "page_a": page_a,
-        "page_b": page_b,
-        "table_rows": table_rows,
-        "unmapped": unmapped,
-        "method_label": method_label,
-    }
+    combined = pd.DataFrame(all_rows)
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        combined.to_excel(writer, index=False, sheet_name="QC")
+    buffer.seek(0)
+    return buffer.read()
 
 
-def _render_qc_result():
-    result = st.session_state.get("qc_result")
-    if not result:
+def _render_product_result(r: dict):
+    st.subheader(f"Sản phẩm: {r['id']}")
+
+    if r.get("error"):
+        st.error(r["error"])
         return
 
-    st.subheader("Kết quả đối chiếu thông số")
-    st.caption(f"Phương pháp đối chiếu: {result['method_label']}")
+    if r.get("warning_b"):
+        st.warning(f"[Trang hãng] {r['warning_b']}")
+    for w in r["page_a"].warnings:
+        st.warning(f"[Bài viết TGDĐ/ĐMX] {w}")
 
-    df = pd.DataFrame(result["table_rows"])
+    df = pd.DataFrame(r["table_rows"])
     if df.empty:
-        st.info("Không có thông số nào để đối chiếu.")
-    else:
+        st.info("Không có thông số nào để hiển thị.")
+    elif r.get("has_comparison"):
         counts = df["Trạng thái"].value_counts()
-        summary_cols = st.columns(len(STATUS_COLORS))
-        for i, (status, _) in enumerate(STATUS_COLORS.items()):
-            with summary_cols[i]:
+        cols = st.columns(len(STATUS_COLORS))
+        for i, status in enumerate(STATUS_COLORS):
+            with cols[i]:
                 st.metric(status, int(counts.get(status, 0)))
-        st.dataframe(_style_status_column(df), use_container_width=True, height=480)
-
-    unmapped = result["unmapped"]
-    if unmapped:
-        st.subheader("Thuộc tính chưa có trong mapping")
-        st.caption(
-            "Các thuộc tính này xuất hiện trong lần chạy nhưng chưa nằm trong "
-            "mapping_thuoc_tinh.xlsx. Tải file gợi ý bên dưới, điền cột ID, "
-            "rồi merge/commit đè vào repo."
-        )
-        unmapped_df = pd.DataFrame([{"Nguồn": u.side, "Nhãn": u.label, "Giá trị": u.value} for u in unmapped])
-        st.dataframe(unmapped_df, use_container_width=True)
-
-        mapping_result = st.session_state.get("mapping_result")
-        if mapping_result and mapping_result.ok:
-            buffer = am.build_updated_mapping_with_suggestions(mapping_result.dataframe, unmapped)
-            st.download_button(
-                "Tải mapping đã gộp kèm gợi ý dòng mới",
-                data=buffer,
-                file_name="mapping_thuoc_tinh_suggestions.xlsx",
-                key="download_suggested_mapping",
-            )
-
-    page_b = result["page_b"]
-    if page_b is not None:
-        st.subheader("Đối chiếu ảnh sản phẩm")
-        images_a = result["page_a"].images
-        images_b = page_b.images
-        if not images_a or not images_b:
-            st.info("Thiếu ảnh ở 1 trong 2 nguồn nên chưa thể so sánh ảnh.")
-        else:
-            with st.spinner("Đang tải ảnh và so sánh (perceptual hash)..."):
-                image_matches = compare_image_sets(images_a, images_b)
-            for match in image_matches:
-                cols = st.columns([1, 1, 1])
-                with cols[0]:
-                    if match.url_a:
-                        st.image(match.url_a, caption="TGDĐ/ĐMX", use_container_width=True)
-                with cols[1]:
-                    if match.url_b:
-                        st.image(match.url_b, caption="Hãng", use_container_width=True)
-                with cols[2]:
-                    color = STATUS_COLORS.get(match.status, "")
-                    st.markdown(
-                        f"<div style='background-color:{color};padding:8px;border-radius:6px'>"
-                        f"<b>{match.status}</b><br/>"
-                        f"Khoảng cách phash: {match.distance if match.distance is not None else '—'}"
-                        f"{'<br/>' + match.error if match.error else ''}"
-                        "</div>",
-                        unsafe_allow_html=True,
-                    )
-                st.divider()
+        st.dataframe(_style_status_column(df), use_container_width=True, height=400)
     else:
-        st.caption("Chưa dán link trang hãng nên bỏ qua bước đối chiếu ảnh.")
+        st.caption("Chưa có link trang hãng — chỉ liệt kê TSKT đọc được từ bài viết.")
+        st.dataframe(df, use_container_width=True, height=400)
+
+    page_b = r.get("page_b")
+    if page_b is None:
+        return
+
+    images_a, images_b = r["page_a"].images, page_b.images
+    if not images_a or not images_b:
+        st.caption("Thiếu ảnh ở 1 trong 2 nguồn nên bỏ qua so ảnh.")
+        return
+
+    image_matches = r.get("image_matches")
+    if image_matches is None:
+        if r.get("image_error"):
+            st.info(f"Lỗi so ảnh: {r['image_error']}")
+        return
+
+    with st.expander(f"Đối chiếu ảnh sản phẩm — {r['id']}", expanded=False):
+        for m in image_matches:
+            cols = st.columns([1, 1, 1])
+            with cols[0]:
+                if m.url_a:
+                    st.image(m.url_a, caption="TGDĐ/ĐMX", use_container_width=True)
+            with cols[1]:
+                if m.url_b:
+                    st.image(m.url_b, caption="Hãng", use_container_width=True)
+            with cols[2]:
+                color = STATUS_COLORS.get(m.status, "")
+                st.markdown(
+                    f"<div style='background-color:{color};padding:8px;border-radius:6px'>"
+                    f"<b>{m.status}</b><br/>"
+                    f"Khoảng cách phash: {m.distance if m.distance is not None else '—'}"
+                    f"{'<br/>' + m.error if m.error else ''}"
+                    "</div>",
+                    unsafe_allow_html=True,
+                )
+            st.divider()
+
+
+def _render_batch_results():
+    results = st.session_state.get("batch_results")
+    if not results:
+        return
+
+    st.divider()
+    st.header("Kết quả QC hàng loạt")
+
+    workbook = _build_export_workbook(results)
+    if workbook:
+        st.download_button(
+            "Tải toàn bộ kết quả (xlsx)",
+            data=workbook,
+            file_name="qc_ket_qua.xlsx",
+            key="download_batch_results",
+        )
+
+    for r in results:
+        st.divider()
+        _render_product_result(r)
 
 
 def main():
     st.set_page_config(page_title="QC Thông số kỹ thuật", layout="wide")
-    st.title("QC Thông số kỹ thuật (TGDĐ/ĐMX)")
+    st.title("QC Thông số kỹ thuật (TGDĐ/ĐMX) — hàng loạt")
     st.caption(
-        "Dán link bài viết trên web TGDĐ/ĐMX và (nếu có) link trang hãng để "
-        "đối chiếu thông số kỹ thuật + ảnh sản phẩm."
+        "Dán nhiều dòng: ID sản phẩm, link bài viết TGDĐ/ĐMX (bắt buộc), "
+        "link trang hãng (tuỳ chọn). Bấm \"Chạy QC hàng loạt\" để đối chiếu "
+        "thông số kỹ thuật + ảnh sản phẩm cho tất cả cùng lúc."
     )
 
     _init_session_state()
 
-    with st.form("qc_form"):
-        url_dmx = st.text_input("Link bài viết TGDĐ/ĐMX (bắt buộc)", placeholder="https://www.dienmayxanh.com/...")
-        url_hang = st.text_input("Link trang hãng (tuỳ chọn)", placeholder="https://www.samsung.com/...")
-        submitted = st.form_submit_button("Chạy QC", type="primary")
+    edited = st.data_editor(
+        st.session_state["batch_input"],
+        num_rows="dynamic",
+        use_container_width=True,
+        column_config={
+            "ID": st.column_config.TextColumn("ID sản phẩm", width="small"),
+            "Link bài viết": st.column_config.TextColumn(
+                "Link bài viết TGDĐ/ĐMX", width="large"
+            ),
+            "Link hãng": st.column_config.TextColumn(
+                "Link trang hãng (tuỳ chọn)", width="large"
+            ),
+        },
+        key="batch_editor",
+    )
+    st.session_state["batch_input"] = edited
 
-    mapping_result = _render_mapping_panel()
+    if st.button("Chạy QC hàng loạt", type="primary"):
+        rows = edited.fillna("").to_dict("records")
+        valid_rows = [r for r in rows if str(r.get("Link bài viết", "")).strip()]
 
-    if submitted:
-        if not url_dmx.strip():
-            st.error("Vui lòng dán link bài viết TGDĐ/ĐMX.")
+        if not valid_rows:
+            st.error("Chưa có dòng nào có link bài viết TGDĐ/ĐMX.")
         else:
-            try:
-                _run_qc(url_dmx.strip(), url_hang.strip(), mapping_result)
-            except Exception as exc:  # noqa: BLE001 - báo lỗi rõ ràng cho người dùng thay vì crash app
-                st.error(f"Lỗi khi chạy QC: {exc}")
+            results = []
+            progress = st.progress(0.0)
+            for i, row in enumerate(valid_rows):
+                pid = str(row.get("ID", "")).strip() or f"(dòng {i + 1})"
+                url_a = str(row.get("Link bài viết", "")).strip()
+                url_b = str(row.get("Link hãng", "")).strip()
+                with st.spinner(f"Đang xử lý {pid}..."):
+                    results.append(_process_one_product(pid, url_a, url_b))
+                progress.progress((i + 1) / len(valid_rows))
+            st.session_state["batch_results"] = results
 
-    _render_qc_result()
+    _render_batch_results()
 
 
 if __name__ == "__main__":
