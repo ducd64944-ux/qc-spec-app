@@ -213,11 +213,16 @@ _LABEL_VALUE_PATTERN = re.compile(r"^(?P<label>[^:：]{2,60})[:：]\s*(?P<value>
 
 def _extract_from_label_value_text(root) -> list:
     """Bắt các dòng dạng text tự do 'Label: Value' bên trong li/p/div (không
-    nằm trong table/dl để tránh trích trùng)."""
+    nằm trong table/dl để tránh trích trùng, và không phải là 1 khối div bọc
+    ngoài chứa cả 1 danh sách ul/li nhiều thuộc tính — nếu không, text của cả
+    khối bị nối lại và match nhầm thành 1 cặp label/value rác, ví dụ 1 <div>
+    bọc ngoài 1 <ul> gồm nhiều <li> "Label: Value" khác nhau)."""
     results = []
     for tag in _tags_including_self(root, ["li", "p", "div"]):
         if tag.find(["table", "dl"]):
             continue  # để _extract_from_tables/_definition_lists xử lý
+        if tag.name != "li" and tag.find(["ul", "ol", "li"]):
+            continue  # khối bọc ngoài 1 danh sách -> để xử lý ở từng <li> riêng
         text = tag.get_text(" ", strip=True)
         if not text or len(text) > 200:
             continue
