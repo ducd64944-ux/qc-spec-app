@@ -52,6 +52,11 @@ VALUE_COLUMN_NAMES = [
     "giá trị chuẩn",
 ]
 
+# Cột fallback khi "Giá trị chốt" tồn tại nhưng rỗng hoàn toàn
+VALUE_FALLBACK_NAMES = [
+    "giá trị chọn",
+]
+
 # Template 2: "Bảng TSKT đầy đủ" (multi-product PIM)
 PIM_LABEL_COLUMN_NAMES = [
     "bảng tskt đầy đủ",
@@ -172,11 +177,30 @@ def _pick_product_column(rows: list, data_col_indices: list,
 
 
 def _parse_template_gia_tri_chot(rows: list, header: list) -> dict | None:
-    """Template 1: cột 'Tên thuộc tính' + 'Giá trị chốt'."""
+    """Template 1: cột 'Tên thuộc tính' + 'Giá trị chốt'.
+
+    Nếu cột 'Giá trị chốt' tồn tại nhưng rỗng hoàn toàn (chưa chốt giá trị),
+    tự động fallback sang cột 'Giá trị chọn' (nếu có) để lấy dữ liệu."""
     label_idx = _find_column_index(header, LABEL_COLUMN_NAMES)
     value_idx = _find_column_index(header, VALUE_COLUMN_NAMES)
     if label_idx is None or value_idx is None:
         return None
+
+    # Kiểm tra cột value có dữ liệu thực không (>= 3 dòng có giá trị)
+    filled_count = sum(
+        1 for row in rows[1:]
+        if value_idx < len(row) and row[value_idx].strip()
+    )
+    if filled_count < 3:
+        # Cột "Giá trị chốt" rỗng/gần rỗng → thử fallback "Giá trị chọn"
+        fallback_idx = _find_column_index(header, VALUE_FALLBACK_NAMES)
+        if fallback_idx is not None:
+            fallback_filled = sum(
+                1 for row in rows[1:]
+                if fallback_idx < len(row) and row[fallback_idx].strip()
+            )
+            if fallback_filled >= 3:
+                value_idx = fallback_idx
 
     specs = {}
     for row in rows[1:]:
