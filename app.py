@@ -349,8 +349,8 @@ def _process_one_product(product_id: str, url_a: str, url_b: str,
     if url_b:
         try:
             if is_google_sheet_url(url_b):
-                page_b = load_google_sheet_source(url_b)
-                source_b_label = "Google Sheet tham khảo (Giá trị chốt)"
+                page_b = load_google_sheet_source(url_b, product_hint=product_id)
+                source_b_label = "Google Sheet tham khảo"
             else:
                 page_b = scrape_page(url_b)
                 source_b_label = "link trang hãng"
