@@ -47,14 +47,10 @@ LABEL_COLUMN_NAMES = [
 ]
 VALUE_COLUMN_NAMES = [
     "giá trị chốt",
+    "giá trị chọn",
     "giá trị",
     "value",
     "giá trị chuẩn",
-]
-
-# Cột fallback khi "Giá trị chốt" tồn tại nhưng rỗng hoàn toàn
-VALUE_FALLBACK_NAMES = [
-    "giá trị chọn",
 ]
 
 # Template 2: "Bảng TSKT đầy đủ" (multi-product PIM)
@@ -177,38 +173,48 @@ def _pick_product_column(rows: list, data_col_indices: list,
 
 
 def _parse_template_gia_tri_chot(rows: list, header: list) -> dict | None:
-    """Template 1: cột 'Tên thuộc tính' + 'Giá trị chốt'.
+    """Template 1: cột 'Tên thuộc tính' + cột giá trị.
 
-    Nếu cột 'Giá trị chốt' tồn tại nhưng rỗng hoàn toàn (chưa chốt giá trị),
-    tự động fallback sang cột 'Giá trị chọn' (nếu có) để lấy dữ liệu."""
+    Tìm TẤT CẢ cột giá trị có trong sheet, dòng nào có data ở cột nào
+    thì lấy — không bỏ sót."""
     label_idx = _find_column_index(header, LABEL_COLUMN_NAMES)
-    value_idx = _find_column_index(header, VALUE_COLUMN_NAMES)
-    if label_idx is None or value_idx is None:
+    if label_idx is None:
         return None
 
-    # Kiểm tra cột value có dữ liệu thực không (>= 3 dòng có giá trị)
-    filled_count = sum(
-        1 for row in rows[1:]
-        if value_idx < len(row) and row[value_idx].strip()
-    )
-    if filled_count < 3:
-        # Cột "Giá trị chốt" rỗng/gần rỗng → thử fallback "Giá trị chọn"
-        fallback_idx = _find_column_index(header, VALUE_FALLBACK_NAMES)
-        if fallback_idx is not None:
-            fallback_filled = sum(
-                1 for row in rows[1:]
-                if fallback_idx < len(row) and row[fallback_idx].strip()
-            )
-            if fallback_filled >= 3:
-                value_idx = fallback_idx
+    # Tìm tất cả cột giá trị có mặt trong header
+    normalized_header = [h.strip().lower() for h in header]
+    value_indices = []
+    for name in VALUE_COLUMN_NAMES:
+        name_norm = name.strip().lower()
+        # Exact match
+        if name_norm in normalized_header:
+            idx = normalized_header.index(name_norm)
+            if idx not in value_indices and idx != label_idx:
+                value_indices.append(idx)
+            continue
+        # Contains match
+        for i, h in enumerate(normalized_header):
+            if name_norm in h and i not in value_indices and i != label_idx:
+                value_indices.append(i)
+                break
+
+    if not value_indices:
+        return None
 
     specs = {}
     for row in rows[1:]:
-        if len(row) <= max(label_idx, value_idx):
+        if label_idx >= len(row):
             continue
         label = row[label_idx].strip()
-        value = row[value_idx].strip()
-        if not label or not value:
+        if not label:
+            continue
+        # Lấy giá trị từ cột nào có data
+        value = ""
+        for vi in value_indices:
+            if vi < len(row) and row[vi].strip():
+                value = row[vi].strip()
+                break
+        if not value:
             continue
         specs.setdefault(label, value)
     return specs
