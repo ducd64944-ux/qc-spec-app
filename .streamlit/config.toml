@@ -1,0 +1,13 @@
+# Theme "Material You" (Material Design 3) — seed màu xanh lá ĐMX, thay vì
+# tím mặc định trong design system gốc. Đây là cách theme idiomatic của
+# Streamlit (áp dụng cho toàn bộ widget gốc: nút, input, slider, checkbox...).
+# CSS bổ sung (bo góc lớn, nút pill-shape, font Roboto...) nằm trong
+# app.py (_inject_theme_css), vì Streamlit config.toml không hỗ trợ hết các
+# token của Material You (border-radius, shadow, font ngoài 3 lựa chọn có sẵn).
+[theme]
+base = "light"
+primaryColor = "#1B8A3D"
+backgroundColor = "#FBFDF7"
+secondaryBackgroundColor = "#EEF3EA"
+textColor = "#1A1C18"
+font = "sans serif"

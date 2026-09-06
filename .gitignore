@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+
+# Cookie cá nhân dán qua khung "Quản lý JSON Cookie" trong app.py — KHÔNG
+# commit lên git vì có thể chứa token/dữ liệu phiên thật của người dùng.
+saved_cookie.json

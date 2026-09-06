@@ -24,6 +24,8 @@ Chạy local:  streamlit run app.py
 from __future__ import annotations
 
 import io
+import json
+import os
 import re
 
 import pandas as pd
@@ -32,7 +34,7 @@ import streamlit as st
 from image_compare import compare_image_sets
 from local_source import load_local_source
 from matcher import match_specs_fuzzy
-from scraper import resolve_product_id_url, scrape_page
+from scraper import SAVED_COOKIE_FILE, resolve_product_id_url, scrape_page
 
 # Nhận ID sản phẩm trần (vd "370907" -> mặc định ĐMX) hoặc có tiền tố domain
 # (vd "tgdd:123456" -> TGDĐ). Chỉ áp dụng cho cột "Link bài viết" khi giá trị
@@ -43,14 +45,146 @@ _PRODUCT_ID_PATTERN = re.compile(r"^(?:(dmx|tgdd):)?(\d{4,})$", re.IGNORECASE)
 # bấm bằng trình duyệt thật (có đủ cookie/JS) khi app không tự resolve được.
 _SHORTCUT_DOMAINS = {"dmx": "www.dienmayxanh.com", "tgdd": "www.thegioididong.com"}
 
+# Bảng màu tonal theo palette Material You / seed xanh lá ĐMX bên dưới
+# (_THEME_CSS), để trạng thái Khớp/Lệch/... đồng bộ với theme chung thay vì
+# màu Bootstrap mặc định cũ.
 STATUS_COLORS = {
-    "Khớp": "#d4edda",
-    "Lệch": "#f8d7da",
-    "Nghi ngờ": "#fff3cd",
-    "Thiếu": "#e2e3e5",
-    "Không khớp": "#f8d7da",
-    "Lỗi tải ảnh": "#e2e3e5",
+    "Khớp": "#DCF3E0",       # secondary container (xanh lá nhạt)
+    "Lệch": "#FBE3E0",       # đỏ tonal
+    "Nghi ngờ": "#FCEFC7",   # vàng/gold tonal (tertiary)
+    "Thiếu": "#E9ECE6",      # xám tonal trung tính
+    "Không khớp": "#FBE3E0",
+    "Lỗi tải ảnh": "#E9ECE6",
 }
+
+# --- Theme "Material You" (seed xanh lá + vàng ĐMX) --------------------------
+# Màu cơ bản (primaryColor, backgroundColor...) đã đặt trong
+# .streamlit/config.toml — đây là cách idiomatic của Streamlit, áp dụng cho
+# mọi widget gốc mà không cần hack CSS. Khối CSS dưới đây chỉ bổ sung các
+# token Material You mà config.toml không hỗ trợ: bo góc lớn (24px), nút
+# pill-shape, font Roboto, hiệu ứng hover/focus, shadow tonal — áp cho các
+# phần tử Streamlit có thể target bằng CSS an toàn (button, alert, expander,
+# input, container ảnh/kết quả). Bảng nhập liệu (st.data_editor) và bảng kết
+# quả (st.dataframe) dùng canvas nội bộ (glide-data-grid) nên không thể theme
+# sâu bằng CSS — chỉ bo góc/đổ bóng được phần khung bọc ngoài.
+_THEME_CSS = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap');
+
+html, body, [class*="css"] {
+    font-family: 'Roboto', 'Segoe UI', sans-serif !important;
+}
+
+:root {
+    --md-primary: #1B8A3D;
+    --md-on-primary: #FFFFFF;
+    --md-secondary-container: #DCF3E0;
+    --md-on-secondary-container: #0D3B1E;
+    --md-tertiary: #C99A00;
+    --md-on-tertiary: #3A2900;
+    --md-surface: #FBFDF7;
+    --md-surface-container: #EEF3EA;
+    --md-surface-container-low: #E2E8DB;
+    --md-outline: #74796D;
+}
+
+/* Nút bấm: pill-shape + state layer + tactile feedback */
+.stButton > button, .stDownloadButton > button {
+    border-radius: 999px !important;
+    border: none !important;
+    padding: 0.5rem 1.5rem !important;
+    font-weight: 500 !important;
+    letter-spacing: 0.01em;
+    transition: all 200ms cubic-bezier(0.2, 0, 0, 1) !important;
+    box-shadow: none !important;
+}
+.stButton > button[kind="primary"], .stDownloadButton > button {
+    background-color: var(--md-primary) !important;
+    color: var(--md-on-primary) !important;
+}
+.stButton > button[kind="primary"]:hover, .stDownloadButton > button:hover {
+    background-color: #16702F !important;
+    box-shadow: 0 2px 6px rgba(27, 138, 61, 0.35) !important;
+    transform: translateY(-1px);
+}
+.stButton > button[kind="primary"]:active, .stDownloadButton > button:active {
+    transform: scale(0.97);
+}
+.stButton > button[kind="secondary"] {
+    background-color: var(--md-secondary-container) !important;
+    color: var(--md-on-secondary-container) !important;
+}
+.stButton > button[kind="secondary"]:hover {
+    filter: brightness(0.96);
+}
+
+/* Card/container bo góc lớn kiểu Material You (expander, alert, khung ảnh) */
+div[data-testid="stExpander"] {
+    border-radius: 20px !important;
+    border: 1px solid var(--md-outline) !important;
+    background-color: var(--md-surface-container) !important;
+    overflow: hidden;
+}
+div[data-testid="stExpander"] summary {
+    font-weight: 500 !important;
+}
+
+div[data-testid="stAlert"] {
+    border-radius: 16px !important;
+}
+
+/* Input/textarea: bo góc, viền focus theo màu primary */
+.stTextInput input, .stTextArea textarea {
+    border-radius: 12px !important;
+    transition: border-color 200ms ease !important;
+}
+.stTextInput input:focus, .stTextArea textarea:focus {
+    border-color: var(--md-primary) !important;
+    box-shadow: 0 0 0 1px var(--md-primary) !important;
+}
+
+/* Metric (đếm Khớp/Lệch/...): thành chip tonal thay vì số trần */
+div[data-testid="stMetric"] {
+    background-color: var(--md-surface-container-low);
+    border-radius: 16px;
+    padding: 0.75rem 0.5rem;
+    text-align: center;
+}
+
+/* File uploader: bo góc lớn đồng bộ */
+div[data-testid="stFileUploaderDropzone"] {
+    border-radius: 20px !important;
+    background-color: var(--md-surface-container) !important;
+}
+
+/* Khung bọc bảng nhập liệu / bảng kết quả: bo góc + đổ bóng nhẹ */
+div[data-testid="stDataFrame"], div[data-testid="stDataFrameResizable"] {
+    border-radius: 16px !important;
+    overflow: hidden;
+    box-shadow: 0 1px 3px rgba(26, 28, 24, 0.12);
+}
+
+/* Tiêu đề trang */
+h1 {
+    font-weight: 700 !important;
+    letter-spacing: -0.01em;
+    color: #10371D;
+}
+h2, h3 {
+    font-weight: 500 !important;
+}
+
+/* Vùng nội dung chính: thêm khoảng đệm rộng rãi hơn kiểu Material You */
+.block-container {
+    padding-top: 2rem !important;
+    padding-bottom: 3rem !important;
+}
+</style>
+"""
+
+
+def _inject_theme_css():
+    st.markdown(_THEME_CSS, unsafe_allow_html=True)
 
 EMPTY_ROW = {"ID": "", "Link bài viết": "", "Link hãng": ""}
 
@@ -116,6 +250,66 @@ def _shortcut_link_for_id(raw: str) -> str | None:
     product_id = match.group(2)
     domain = _SHORTCUT_DOMAINS.get(domain_key, _SHORTCUT_DOMAINS["dmx"])
     return f"https://{domain}/sp-{product_id}"
+
+
+def _render_cookie_manager():
+    """Khung quản lý JSON Cookie (định dạng xuất từ EditThisCookie) dùng để
+    resolve link /sp-<id> khi cách "làm nóng" mặc định bị chặn 404. Đức tự
+    dán cookie từ trình duyệt của mình vào đây — đây là dữ liệu do Đức tự
+    cung cấp và tự chịu trách nhiệm, không phải app tự thu thập. Cookie được
+    lưu vào SAVED_COOKIE_FILE cục bộ (không commit lên git — xem .gitignore).
+
+    Lưu ý bảo mật: nếu app này được deploy công khai (ai cũng xem được, như
+    Streamlit Community Cloud mặc định), NỘI DUNG cookie đã lưu sẽ hiển thị
+    lại trong ô text_area cho BẤT KỲ AI mở app — kể cả token đăng nhập thật.
+    Nên hạn chế người xem app (Streamlit Cloud > Settings > Sharing) nếu có
+    dán cookie thật vào đây."""
+    with st.expander("⚙️ Quản lý JSON Cookie (Vượt rào 404)", expanded=False):
+        st.caption(
+            "Dán JSON cookie xuất từ tiện ích EditThisCookie (khi đang đăng "
+            "nhập/mở trang dienmayxanh.com hoặc thegioididong.com bằng chính "
+            "trình duyệt của Đức) để giúp resolve link /sp-<id> đáng tin cậy "
+            "hơn. ⚠️ Cookie này là dữ liệu phiên cá nhân — nếu app được deploy "
+            "công khai, bất kỳ ai mở app cũng thấy được nội dung đã lưu ở "
+            "đây. Nên giới hạn người xem app nếu dán cookie thật."
+        )
+
+        try:
+            with open(SAVED_COOKIE_FILE, "r", encoding="utf-8") as f:
+                default_text = f.read()
+        except (OSError, FileNotFoundError):
+            default_text = ""
+
+        cookie_text = st.text_area(
+            "JSON Cookie", value=default_text, height=160,
+            key="cookie_json_input",
+            placeholder='[{"domain": ".dienmayxanh.com", "name": "...", "value": "...", ...}, ...]',
+        )
+
+        if st.button("Lưu Cookie", key="save_cookie_btn"):
+            stripped = cookie_text.strip()
+            if not stripped:
+                try:
+                    os.remove(SAVED_COOKIE_FILE)
+                except FileNotFoundError:
+                    pass
+                st.success("Đã xoá cookie đã lưu (ô trống).")
+            else:
+                try:
+                    parsed = json.loads(stripped)
+                except json.JSONDecodeError as exc:
+                    st.error(f"JSON không hợp lệ: {exc}")
+                else:
+                    if not isinstance(parsed, list):
+                        st.error(
+                            "JSON hợp lệ nhưng không phải dạng danh sách "
+                            "(list) cookie — dán đúng định dạng xuất từ "
+                            "EditThisCookie (mảng [...] các object cookie)."
+                        )
+                    else:
+                        with open(SAVED_COOKIE_FILE, "w", encoding="utf-8") as f:
+                            f.write(stripped)
+                        st.success(f"Đã lưu {len(parsed)} cookie vào {SAVED_COOKIE_FILE}.")
 
 
 def _image_display(ref):
@@ -305,7 +499,8 @@ def _render_batch_results():
 
 
 def main():
-    st.set_page_config(page_title="QC Thông số kỹ thuật", layout="wide")
+    st.set_page_config(page_title="QC Thông số kỹ thuật", layout="wide", page_icon="🟢")
+    _inject_theme_css()
     st.title("QC Thông số kỹ thuật (TGDĐ/ĐMX) — hàng loạt")
     st.caption(
         "Dán nhiều dòng: chỉ cần ID sản phẩm (cột ID) + link trang hãng "
@@ -380,6 +575,8 @@ def main():
         type=["jpg", "jpeg", "png", "webp", "gif", "bmp", "pdf", "xlsx", "xls", "csv", "txt"],
         key="local_source_files",
     )
+
+    _render_cookie_manager()
 
     if st.button("Chạy QC hàng loạt", type="primary"):
         rows = edited.fillna("").to_dict("records")

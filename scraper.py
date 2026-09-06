@@ -16,6 +16,8 @@ thuật đứng trước trong danh sách _EXTRACT_STRATEGIES).
 
 from __future__ import annotations
 
+import json
+import os
 import re
 import time
 from dataclasses import dataclass, field
@@ -96,16 +98,43 @@ ID_SHORTCUT_DOMAINS = {
     "tgdd": "www.thegioididong.com",
 }
 
+# File lưu cookie JSON do Đức tự dán vào UI (xem app.py, khung "Quản lý JSON
+# Cookie"). File này KHÔNG được commit lên git (xem .gitignore) vì có thể
+# chứa dữ liệu phiên cá nhân/token thật của Đức — chỉ tồn tại cục bộ trên máy
+# chạy app (hoặc trên Streamlit Cloud, nơi filesystem không persist qua các
+# lần deploy/redeploy, nên cần dán lại sau mỗi lần app redeploy).
+SAVED_COOKIE_FILE = "saved_cookie.json"
+
+
+def _get_saved_cookies() -> list:
+    """Đọc danh sách cookie đã lưu (định dạng xuất từ EditThisCookie) từ
+    SAVED_COOKIE_FILE. Xử lý an toàn: file không tồn tại, JSON hỏng, hoặc nội
+    dung không phải list -> trả về [] thay vì raise, để không làm sập luồng
+    resolve ID khi không có cookie hoặc cookie lỗi."""
+    if not os.path.exists(SAVED_COOKIE_FILE):
+        return []
+    try:
+        with open(SAVED_COOKIE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(data, list):
+        return []
+    return data
+
 
 def resolve_product_id_url(product_id: str, domain_key: str = "dmx") -> str:
     """Chuyển ID sản phẩm (vd '370907') thành URL bài viết đầy đủ, tận dụng
     link rút gọn https://<domain>/sp-<id> mà TGDĐ/ĐMX tự resolve sang URL
-    bài viết thật. Gọi thẳng link này từ 1 phiên hoàn toàn mới (chưa có
-    cookie nào, ví dụ 1 trình duyệt/HTTP client vừa khởi tạo) có thể bị trả
-    404 — không phải vì cần đăng nhập, mà vì thiếu vài cookie phiên/vùng cơ
-    bản mà site tự đặt khi ghé trang chủ lần đầu. Nên trước khi gọi link rút
-    gọn, "làm nóng" bằng 1 lượt GET trang chủ để có cookie đó, không cần và
-    không dùng bất kỳ cookie đăng nhập/token cá nhân nào của người dùng."""
+    bài viết thật.
+
+    Nếu Đức đã dán + lưu cookie (qua khung "Quản lý JSON Cookie" trong
+    app.py), ưu tiên gắn các cookie đó vào session trước khi gọi link rút
+    gọn — cookie này do chính Đức tự cung cấp từ trình duyệt của mình (không
+    phải do app tự thu thập), lưu cục bộ trong SAVED_COOKIE_FILE, không commit
+    lên git. Nếu không có cookie đã lưu (hoặc parse lỗi), fallback về cách cũ:
+    "làm nóng" bằng 1 lượt GET trang chủ để có cookie phiên/vùng cơ bản,
+    không cần và không dùng cookie đăng nhập/token cá nhân nào."""
     domain = ID_SHORTCUT_DOMAINS.get(domain_key, ID_SHORTCUT_DOMAINS["dmx"])
     headers = {
         "User-Agent": USER_AGENT,
@@ -113,10 +142,21 @@ def resolve_product_id_url(product_id: str, domain_key: str = "dmx") -> str:
     }
     session = requests.Session()
     session.headers.update(headers)
-    try:
-        session.get(f"https://{domain}/", timeout=REQUEST_TIMEOUT)
-    except requests.RequestException:
-        pass  # làm nóng thất bại cũng cứ thử bước sau, có thể vẫn resolve được
+
+    saved_cookies = _get_saved_cookies()
+    if saved_cookies:
+        for c in saved_cookies:
+            try:
+                session.cookies.set(
+                    c["name"], c["value"], domain=c.get("domain", "") or domain,
+                )
+            except Exception:  # noqa: BLE001 - field rác/kiểu lạ -> bỏ qua, không sập
+                continue
+    else:
+        try:
+            session.get(f"https://{domain}/", timeout=REQUEST_TIMEOUT)
+        except requests.RequestException:
+            pass  # làm nóng thất bại cũng cứ thử bước sau, có thể vẫn resolve được
 
     resp = session.get(
         f"https://{domain}/sp-{product_id}",
