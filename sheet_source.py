@@ -324,6 +324,13 @@ def load_google_sheet_source(url: str,
 
     content_type = resp.headers.get("Content-Type", "")
     if "text/html" in content_type:
+        # Kiểm tra xem HTML có phải trang lỗi "file không tồn tại" không
+        body_lower = resp.text[:2000].lower()
+        if "không tồn tại" in body_lower or "not found" in body_lower or "404" in body_lower:
+            raise RuntimeError(
+                "Google Sheet không tồn tại hoặc đã bị xóa/di chuyển — "
+                "kiểm tra lại link."
+            )
         raise RuntimeError(
             "Google Sheet có vẻ chưa công khai — app nhận về trang đăng "
             "nhập/HTML thay vì dữ liệu CSV. Vào Chia sẻ > Anyone with the "
@@ -331,9 +338,24 @@ def load_google_sheet_source(url: str,
         )
 
     text = resp.content.decode("utf-8-sig", errors="ignore")
+
+    # Kiểm tra nội dung có thực sự là CSV hay là response lỗi dạng khác
+    if not text.strip() or len(text.strip()) < 10:
+        raise RuntimeError(
+            "Google Sheet trả về dữ liệu rỗng — có thể file không tồn tại, "
+            "đã bị xóa, hoặc chưa được chia sẻ công khai."
+        )
+
     rows = list(csv.reader(io.StringIO(text)))
     if not rows:
         raise RuntimeError("Google Sheet trống hoặc không đọc được dữ liệu.")
+
+    # Sheet chỉ có 1 dòng (header) hoặc quá ít dữ liệu -> có thể lỗi
+    if len(rows) <= 1:
+        raise RuntimeError(
+            "Google Sheet chỉ có 1 dòng (header) — không có dữ liệu thông số. "
+            "Kiểm tra lại đúng sheet/tab (gid)."
+        )
 
     header = rows[0]
 
@@ -362,9 +384,13 @@ def load_google_sheet_source(url: str,
         if template_used:
             source.warnings.append(f"Nhận diện template: {template_used}")
     else:
+        # Gợi ý chi tiết hơn dựa trên nội dung thực tế
+        header_preview = ", ".join(h[:30] for h in header[:4] if h.strip())
         source.warnings.append(
-            "Không nhận diện được template thông số trong sheet — kiểm tra "
-            "lại đúng sheet/tab (gid) chứa dữ liệu thông số."
+            f"Không nhận diện được template thông số trong sheet "
+            f"({len(rows)} dòng, header: [{header_preview}]). "
+            "Kiểm tra: (1) link đúng sheet/tab chứa dữ liệu? "
+            "(2) file vẫn tồn tại và được chia sẻ công khai?"
         )
 
     return source
