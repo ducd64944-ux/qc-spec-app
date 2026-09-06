@@ -288,10 +288,12 @@ def main():
     st.set_page_config(page_title="QC Thông số kỹ thuật", layout="wide")
     st.title("QC Thông số kỹ thuật (TGDĐ/ĐMX) — hàng loạt")
     st.caption(
-        "Dán nhiều dòng: ID sản phẩm, link bài viết TGDĐ/ĐMX (bắt buộc), "
-        "link trang hãng (tuỳ chọn — nếu không có, có thể upload file nguồn "
-        "đối chiếu ở bên dưới thay thế). Bấm \"Chạy QC hàng loạt\" để đối "
-        "chiếu thông số kỹ thuật + ảnh sản phẩm cho tất cả cùng lúc."
+        "Dán nhiều dòng: chỉ cần ID sản phẩm (cột ID) + link trang hãng "
+        "(cột Link hãng). Cột \"Link bài viết\" có thể để trống — hệ thống "
+        "tự suy ra link bài viết TGDĐ/ĐMX từ ID; nếu suy ra bị lỗi (một số "
+        "ID không tự resolve được), dán link bài viết đầy đủ vào cột đó để "
+        "chạy chắc chắn. Bấm \"Chạy QC hàng loạt\" để đối chiếu thông số kỹ "
+        "thuật + ảnh sản phẩm cho tất cả cùng lúc."
     )
 
     _init_session_state()
@@ -301,14 +303,17 @@ def main():
         num_rows="dynamic",
         use_container_width=True,
         column_config={
-            "ID": st.column_config.TextColumn("ID sản phẩm", width="small"),
+            "ID": st.column_config.TextColumn(
+                "ID sản phẩm (vd 370907 = ĐMX, tgdd:123456 = TGDĐ)",
+                width="small",
+            ),
             "Link bài viết": st.column_config.TextColumn(
-                "Link bài viết TGDĐ/ĐMX (hoặc chỉ nhập ID, vd 370907 = ĐMX, "
-                "tgdd:123456 = TGDĐ)",
+                "Link bài viết TGDĐ/ĐMX (để trống = tự suy ra từ ID; dán "
+                "link nếu tự suy ra bị lỗi)",
                 width="large",
             ),
             "Link hãng": st.column_config.TextColumn(
-                "Link trang hãng (tuỳ chọn)", width="large"
+                "Link trang hãng / link spec (tuỳ chọn)", width="large"
             ),
         },
         key="batch_editor",
@@ -332,16 +337,22 @@ def main():
 
     if st.button("Chạy QC hàng loạt", type="primary"):
         rows = edited.fillna("").to_dict("records")
-        valid_rows = [r for r in rows if str(r.get("Link bài viết", "")).strip()]
+        # "Link bài viết" trống nhưng có ID -> dùng ID làm nguồn suy ra link
+        # (xem _resolve_article_url), nên 1 dòng chỉ cần 1 trong 2: ID hoặc
+        # link bài viết đầy đủ.
+        valid_rows = [
+            r for r in rows
+            if str(r.get("Link bài viết", "")).strip() or str(r.get("ID", "")).strip()
+        ]
 
         if not valid_rows:
-            st.error("Chưa có dòng nào có link bài viết TGDĐ/ĐMX.")
+            st.error("Chưa có dòng nào có ID hoặc link bài viết TGDĐ/ĐMX.")
         else:
             results = []
             progress = st.progress(0.0)
             for i, row in enumerate(valid_rows):
                 pid = str(row.get("ID", "")).strip() or f"(dòng {i + 1})"
-                url_a = str(row.get("Link bài viết", "")).strip()
+                url_a = str(row.get("Link bài viết", "")).strip() or str(row.get("ID", "")).strip()
                 url_b = str(row.get("Link hãng", "")).strip()
                 local_files_b = [] if url_b else _match_files_for_id(uploaded_files or [], pid)
                 with st.spinner(f"Đang xử lý {pid}..."):
