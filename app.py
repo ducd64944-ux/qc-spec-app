@@ -5,9 +5,18 @@ App Streamlit giúp QC bài viết thông số kỹ thuật sản phẩm (TGDĐ/
 spec + ảnh do hãng cung cấp. Nhập nhiều dòng cùng lúc: ID sản phẩm + link bài
 viết TGDĐ/ĐMX + link trang hãng (nếu có), bấm 1 nút để chạy QC cho tất cả.
 
+"Nguồn đối chiếu" (spec + ảnh để so sánh) cho mỗi sản phẩm có thể là MỘT
+TRONG HAI cách (không bắt buộc cả hai):
+  - Link trang hãng (cột "Link hãng") -> tự động cào như bài viết TGDĐ/ĐMX.
+  - File tự upload (ảnh/pdf/xlsx/csv/txt) -> dùng khi sản phẩm không có link
+    hãng rõ ràng để cào. Đặt tên file bắt đầu bằng (hoặc chứa) ID sản phẩm để
+    hệ thống tự ghép đúng file vào đúng dòng.
+Nếu 1 dòng có cả link hãng lẫn file upload khớp ID, ưu tiên dùng link hãng.
+
 Không dùng bảng mapping ID thuộc tính (attribute_mapping.py) — đối chiếu
-trực tiếp bằng fuzzy match tên thuộc tính (matcher.py). Khi không có link
-hãng, chỉ liệt kê TSKT đọc được từ bài viết (không so trạng thái Khớp/Lệch).
+trực tiếp bằng fuzzy match tên thuộc tính (matcher.py). Khi không có nguồn
+đối chiếu nào, chỉ liệt kê TSKT đọc được từ bài viết (không so trạng thái
+Khớp/Lệch).
 
 Chạy local:  streamlit run app.py
 """
@@ -15,11 +24,13 @@ Chạy local:  streamlit run app.py
 from __future__ import annotations
 
 import io
+import re
 
 import pandas as pd
 import streamlit as st
 
 from image_compare import compare_image_sets
+from local_source import load_local_source
 from matcher import match_specs_fuzzy
 from scraper import scrape_page
 
@@ -47,9 +58,39 @@ def _init_session_state():
     st.session_state.setdefault("batch_results", None)
 
 
-def _process_one_product(product_id: str, url_a: str, url_b: str) -> dict:
+def _normalize_for_match(text: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", text.lower())
+
+
+def _match_files_for_id(files: list, product_id: str) -> list:
+    """Ghép file upload vào đúng sản phẩm dựa trên tên file có chứa ID (sau
+    khi bỏ ký tự không phải chữ/số để không phụ thuộc dấu -, _, khoảng trắng...)."""
+    pid_norm = _normalize_for_match(product_id)
+    if not pid_norm or not files:
+        return []
+    matched = []
+    for f in files:
+        name_norm = _normalize_for_match(getattr(f, "name", ""))
+        if pid_norm in name_norm:
+            matched.append(f)
+    return matched
+
+
+def _image_display(ref):
+    """ref có thể là URL (str) hoặc tuple (nhãn, bytes) -> trả về dạng
+    st.image chấp nhận được."""
+    if isinstance(ref, tuple):
+        return ref[1]
+    return ref
+
+
+def _process_one_product(product_id: str, url_a: str, url_b: str,
+                          local_files_b: list | None = None) -> dict:
     """Cào + đối chiếu 1 sản phẩm. Lỗi ở 1 sản phẩm không được làm hỏng cả
-    lô — luôn trả về dict, lỗi được ghi vào result['error']."""
+    lô — luôn trả về dict, lỗi được ghi vào result['error'].
+
+    Nguồn đối chiếu (page_b) ưu tiên theo thứ tự: link hãng (url_b) trước,
+    nếu không có mới dùng file upload (local_files_b)."""
     result: dict = {"id": product_id, "url_a": url_a, "url_b": url_b, "error": None}
 
     try:
@@ -60,20 +101,31 @@ def _process_one_product(product_id: str, url_a: str, url_b: str) -> dict:
     result["page_a"] = page_a
 
     page_b = None
+    source_b_label = ""
     if url_b:
         try:
             page_b = scrape_page(url_b)
+            source_b_label = "link trang hãng"
         except Exception as exc:  # noqa: BLE001
             result["warning_b"] = f"Lỗi tải trang hãng: {exc}"
+    elif local_files_b:
+        page_b = load_local_source(local_files_b)
+        source_b_label = "file đã upload (" + ", ".join(
+            getattr(f, "name", "?") for f in local_files_b
+        ) + ")"
+        if page_b.warnings:
+            result["warning_b"] = "; ".join(page_b.warnings)
+
     result["page_b"] = page_b
+    result["source_b_label"] = source_b_label
 
     if page_b is not None:
         fuzzy_rows = match_specs_fuzzy(page_a.specs, page_b.specs)
         result["table_rows"] = [{
             "Thuộc tính (TGDĐ/ĐMX)": r.label_a or "—",
             "Giá trị (TGDĐ/ĐMX)": r.value_a,
-            "Thuộc tính (Hãng)": r.label_b or "—",
-            "Giá trị (Hãng)": r.value_b,
+            "Thuộc tính (nguồn đối chiếu)": r.label_b or "—",
+            "Giá trị (nguồn đối chiếu)": r.value_b,
             "Trạng thái": r.status,
         } for r in fuzzy_rows]
         result["has_comparison"] = True
@@ -85,7 +137,8 @@ def _process_one_product(product_id: str, url_a: str, url_b: str) -> dict:
             except Exception as exc:  # noqa: BLE001
                 result["image_error"] = str(exc)
     else:
-        # Chưa có link hãng -> chỉ liệt kê TSKT đọc được, không so trạng thái
+        # Chưa có nguồn đối chiếu nào -> chỉ liệt kê TSKT đọc được, không so
+        # trạng thái
         result["table_rows"] = [{
             "Thuộc tính": label, "Giá trị": value,
         } for label, value in page_a.specs.items()]
@@ -119,8 +172,11 @@ def _render_product_result(r: dict):
         st.error(r["error"])
         return
 
+    if r.get("source_b_label"):
+        st.caption(f"Nguồn đối chiếu: {r['source_b_label']}")
+
     if r.get("warning_b"):
-        st.warning(f"[Trang hãng] {r['warning_b']}")
+        st.warning(f"[Nguồn đối chiếu] {r['warning_b']}")
     for w in r["page_a"].warnings:
         st.warning(f"[Bài viết TGDĐ/ĐMX] {w}")
 
@@ -135,7 +191,7 @@ def _render_product_result(r: dict):
                 st.metric(status, int(counts.get(status, 0)))
         st.dataframe(_style_status_column(df), use_container_width=True, height=400)
     else:
-        st.caption("Chưa có link trang hãng — chỉ liệt kê TSKT đọc được từ bài viết.")
+        st.caption("Chưa có nguồn đối chiếu (link hãng hoặc file upload) — chỉ liệt kê TSKT đọc được từ bài viết.")
         st.dataframe(df, use_container_width=True, height=400)
 
     page_b = r.get("page_b")
@@ -157,11 +213,13 @@ def _render_product_result(r: dict):
         for m in image_matches:
             cols = st.columns([1, 1, 1])
             with cols[0]:
-                if m.url_a:
-                    st.image(m.url_a, caption="TGDĐ/ĐMX", use_container_width=True)
+                if m.ref_a is not None:
+                    st.image(_image_display(m.ref_a), caption=m.label_a or "TGDĐ/ĐMX",
+                              use_container_width=True)
             with cols[1]:
-                if m.url_b:
-                    st.image(m.url_b, caption="Hãng", use_container_width=True)
+                if m.ref_b is not None:
+                    st.image(_image_display(m.ref_b), caption=m.label_b or "Nguồn đối chiếu",
+                              use_container_width=True)
             with cols[2]:
                 color = STATUS_COLORS.get(m.status, "")
                 st.markdown(
@@ -202,8 +260,9 @@ def main():
     st.title("QC Thông số kỹ thuật (TGDĐ/ĐMX) — hàng loạt")
     st.caption(
         "Dán nhiều dòng: ID sản phẩm, link bài viết TGDĐ/ĐMX (bắt buộc), "
-        "link trang hãng (tuỳ chọn). Bấm \"Chạy QC hàng loạt\" để đối chiếu "
-        "thông số kỹ thuật + ảnh sản phẩm cho tất cả cùng lúc."
+        "link trang hãng (tuỳ chọn — nếu không có, có thể upload file nguồn "
+        "đối chiếu ở bên dưới thay thế). Bấm \"Chạy QC hàng loạt\" để đối "
+        "chiếu thông số kỹ thuật + ảnh sản phẩm cho tất cả cùng lúc."
     )
 
     _init_session_state()
@@ -225,6 +284,21 @@ def main():
     )
     st.session_state["batch_input"] = edited
 
+    st.markdown("**Nguồn đối chiếu thay thế (khi sản phẩm không có link hãng)**")
+    st.caption(
+        "Upload ảnh/pdf/xlsx/csv/txt làm nguồn đối chiếu cho các sản phẩm "
+        "không có link hãng. Đặt tên file có chứa ID sản phẩm (cột ID ở "
+        "bảng trên) để hệ thống tự ghép đúng file vào đúng dòng — ví dụ ID "
+        "là \"SP001\" thì đặt tên file \"SP001_spec.pdf\" hoặc \"SP001-anh1.jpg\". "
+        "1 sản phẩm có thể có nhiều file (vd vừa ảnh vừa pdf)."
+    )
+    uploaded_files = st.file_uploader(
+        "File nguồn đối chiếu",
+        accept_multiple_files=True,
+        type=["jpg", "jpeg", "png", "webp", "gif", "bmp", "pdf", "xlsx", "xls", "csv", "txt"],
+        key="local_source_files",
+    )
+
     if st.button("Chạy QC hàng loạt", type="primary"):
         rows = edited.fillna("").to_dict("records")
         valid_rows = [r for r in rows if str(r.get("Link bài viết", "")).strip()]
@@ -238,8 +312,9 @@ def main():
                 pid = str(row.get("ID", "")).strip() or f"(dòng {i + 1})"
                 url_a = str(row.get("Link bài viết", "")).strip()
                 url_b = str(row.get("Link hãng", "")).strip()
+                local_files_b = [] if url_b else _match_files_for_id(uploaded_files or [], pid)
                 with st.spinner(f"Đang xử lý {pid}..."):
-                    results.append(_process_one_product(pid, url_a, url_b))
+                    results.append(_process_one_product(pid, url_a, url_b, local_files_b))
                 progress.progress((i + 1) / len(valid_rows))
             st.session_state["batch_results"] = results
 

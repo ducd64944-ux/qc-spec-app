@@ -7,3 +7,4 @@ imagehash
 rapidfuzz
 pandas
 openpyxl
+pypdf
