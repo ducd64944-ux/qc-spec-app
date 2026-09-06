@@ -32,7 +32,12 @@ import streamlit as st
 from image_compare import compare_image_sets
 from local_source import load_local_source
 from matcher import match_specs_fuzzy
-from scraper import scrape_page
+from scraper import resolve_product_id_url, scrape_page
+
+# Nhận ID sản phẩm trần (vd "370907" -> mặc định ĐMX) hoặc có tiền tố domain
+# (vd "tgdd:123456" -> TGDĐ). Chỉ áp dụng cho cột "Link bài viết" khi giá trị
+# không phải là 1 URL http(s) đầy đủ.
+_PRODUCT_ID_PATTERN = re.compile(r"^(?:(dmx|tgdd):)?(\d{4,})$", re.IGNORECASE)
 
 STATUS_COLORS = {
     "Khớp": "#d4edda",
@@ -76,6 +81,23 @@ def _match_files_for_id(files: list, product_id: str) -> list:
     return matched
 
 
+def _resolve_article_url(raw: str) -> str:
+    """Nếu raw là URL http(s) đầy đủ thì giữ nguyên. Nếu raw là 1 ID sản
+    phẩm trần (vd "370907", mặc định ĐMX) hoặc có tiền tố domain (vd
+    "tgdd:123456"), tự resolve sang URL bài viết đầy đủ qua link rút gọn
+    /sp-<id>. Không dùng cookie đăng nhập/token cá nhân nào — chỉ "làm
+    nóng" bằng 1 lượt GET trang chủ (xem resolve_product_id_url)."""
+    raw = raw.strip()
+    if raw.lower().startswith("http"):
+        return raw
+    match = _PRODUCT_ID_PATTERN.match(raw)
+    if match:
+        domain_key = (match.group(1) or "dmx").lower()
+        product_id = match.group(2)
+        return resolve_product_id_url(product_id, domain_key)
+    return raw  # để nguyên -> scrape_page sẽ báo lỗi rõ ràng khi không tải được
+
+
 def _image_display(ref):
     """ref có thể là URL (str) hoặc tuple (nhãn, bytes) -> trả về dạng
     st.image chấp nhận được."""
@@ -94,11 +116,18 @@ def _process_one_product(product_id: str, url_a: str, url_b: str,
     result: dict = {"id": product_id, "url_a": url_a, "url_b": url_b, "error": None}
 
     try:
-        page_a = scrape_page(url_a)
+        resolved_url_a = _resolve_article_url(url_a)
+    except Exception as exc:  # noqa: BLE001
+        result["error"] = f"Lỗi phân giải ID sản phẩm '{url_a}': {exc}"
+        return result
+
+    try:
+        page_a = scrape_page(resolved_url_a)
     except Exception as exc:  # noqa: BLE001
         result["error"] = f"Lỗi tải bài viết TGDĐ/ĐMX: {exc}"
         return result
     result["page_a"] = page_a
+    result["url_a"] = resolved_url_a
 
     page_b = None
     source_b_label = ""
@@ -274,7 +303,9 @@ def main():
         column_config={
             "ID": st.column_config.TextColumn("ID sản phẩm", width="small"),
             "Link bài viết": st.column_config.TextColumn(
-                "Link bài viết TGDĐ/ĐMX", width="large"
+                "Link bài viết TGDĐ/ĐMX (hoặc chỉ nhập ID, vd 370907 = ĐMX, "
+                "tgdd:123456 = TGDĐ)",
+                width="large",
             ),
             "Link hãng": st.column_config.TextColumn(
                 "Link trang hãng (tuỳ chọn)", width="large"

@@ -88,6 +88,45 @@ def fetch_html(url: str) -> str:
     raise RuntimeError(f"Không tải được trang '{url}': {last_err}")
 
 
+# Domain dùng cho link rút gọn dạng https://<domain>/sp-<id>, tự động
+# resolve (redirect) sang URL bài viết đầy đủ. "dmx" mặc định vì đó là ví dụ
+# Đức đưa ra; "tgdd" dùng khi ID thuộc thegioididong.com.
+ID_SHORTCUT_DOMAINS = {
+    "dmx": "www.dienmayxanh.com",
+    "tgdd": "www.thegioididong.com",
+}
+
+
+def resolve_product_id_url(product_id: str, domain_key: str = "dmx") -> str:
+    """Chuyển ID sản phẩm (vd '370907') thành URL bài viết đầy đủ, tận dụng
+    link rút gọn https://<domain>/sp-<id> mà TGDĐ/ĐMX tự resolve sang URL
+    bài viết thật. Gọi thẳng link này từ 1 phiên hoàn toàn mới (chưa có
+    cookie nào, ví dụ 1 trình duyệt/HTTP client vừa khởi tạo) có thể bị trả
+    404 — không phải vì cần đăng nhập, mà vì thiếu vài cookie phiên/vùng cơ
+    bản mà site tự đặt khi ghé trang chủ lần đầu. Nên trước khi gọi link rút
+    gọn, "làm nóng" bằng 1 lượt GET trang chủ để có cookie đó, không cần và
+    không dùng bất kỳ cookie đăng nhập/token cá nhân nào của người dùng."""
+    domain = ID_SHORTCUT_DOMAINS.get(domain_key, ID_SHORTCUT_DOMAINS["dmx"])
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
+    }
+    session = requests.Session()
+    session.headers.update(headers)
+    try:
+        session.get(f"https://{domain}/", timeout=REQUEST_TIMEOUT)
+    except requests.RequestException:
+        pass  # làm nóng thất bại cũng cứ thử bước sau, có thể vẫn resolve được
+
+    resp = session.get(
+        f"https://{domain}/sp-{product_id}",
+        timeout=REQUEST_TIMEOUT,
+        allow_redirects=True,
+    )
+    resp.raise_for_status()
+    return resp.url
+
+
 def scrape_page(url: str) -> ScrapedPage:
     html = fetch_html(url)
     soup = BeautifulSoup(html, "lxml")
