@@ -39,6 +39,10 @@ from scraper import resolve_product_id_url, scrape_page
 # không phải là 1 URL http(s) đầy đủ.
 _PRODUCT_ID_PATTERN = re.compile(r"^(?:(dmx|tgdd):)?(\d{4,})$", re.IGNORECASE)
 
+# Domain của link rút gọn /sp-<id>, dùng để tạo link "mở nhanh" cho Đức tự
+# bấm bằng trình duyệt thật (có đủ cookie/JS) khi app không tự resolve được.
+_SHORTCUT_DOMAINS = {"dmx": "www.dienmayxanh.com", "tgdd": "www.thegioididong.com"}
+
 STATUS_COLORS = {
     "Khớp": "#d4edda",
     "Lệch": "#f8d7da",
@@ -96,6 +100,22 @@ def _resolve_article_url(raw: str) -> str:
         product_id = match.group(2)
         return resolve_product_id_url(product_id, domain_key)
     return raw  # để nguyên -> scrape_page sẽ báo lỗi rõ ràng khi không tải được
+
+
+def _shortcut_link_for_id(raw: str) -> str | None:
+    """Nếu raw là 1 ID sản phẩm trần (không phải URL đầy đủ), trả về link rút
+    gọn /sp-<id> để Đức tự bấm mở bằng trình duyệt thật (có đủ cookie/JS mà
+    server của app không có) — chỉ tạo link, không tự tải/fetch gì cả."""
+    raw = raw.strip()
+    if raw.lower().startswith("http"):
+        return None
+    match = _PRODUCT_ID_PATTERN.match(raw)
+    if not match:
+        return None
+    domain_key = (match.group(1) or "dmx").lower()
+    product_id = match.group(2)
+    domain = _SHORTCUT_DOMAINS.get(domain_key, _SHORTCUT_DOMAINS["dmx"])
+    return f"https://{domain}/sp-{product_id}"
 
 
 def _image_display(ref):
@@ -319,6 +339,32 @@ def main():
         key="batch_editor",
     )
     st.session_state["batch_input"] = edited
+
+    rows_now = edited.fillna("").to_dict("records")
+    quick_links = []
+    for row in rows_now:
+        pid_raw = str(row.get("ID", "")).strip()
+        link_filled = str(row.get("Link bài viết", "")).strip()
+        if pid_raw and not link_filled:
+            shortcut = _shortcut_link_for_id(pid_raw)
+            if shortcut:
+                quick_links.append((pid_raw, shortcut))
+
+    if quick_links:
+        with st.expander(
+            f"🔗 Mở nhanh trang sản phẩm theo ID ({len(quick_links)} dòng) "
+            "— dùng khi tự suy ra link bị lỗi",
+            expanded=False,
+        ):
+            st.caption(
+                "App không tự tải được các link này (trang chặn request "
+                "không phải từ trình duyệt thật). Bấm từng link dưới đây để "
+                "mở bằng chính trình duyệt của Đức — trang sẽ tự chuyển "
+                "hướng đúng bài viết — rồi copy link ở thanh địa chỉ, dán "
+                "lại vào cột \"Link bài viết\" ở bảng trên."
+            )
+            for pid_raw, shortcut in quick_links:
+                st.markdown(f"- ID `{pid_raw}`: [{shortcut}]({shortcut})")
 
     st.markdown("**Nguồn đối chiếu thay thế (khi sản phẩm không có link hãng)**")
     st.caption(
