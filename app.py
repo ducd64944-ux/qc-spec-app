@@ -35,6 +35,7 @@ from image_compare import compare_image_sets
 from local_source import load_local_source
 from matcher import match_specs_fuzzy
 from scraper import SAVED_COOKIE_FILE, resolve_product_id_url, scrape_page
+from sheet_source import is_google_sheet_url, load_google_sheet_source
 
 # Nhận ID sản phẩm trần (vd "370907" -> mặc định ĐMX) hoặc có tiền tố domain
 # (vd "tgdd:123456" -> TGDĐ). Chỉ áp dụng cho cột "Link bài viết" khi giá trị
@@ -347,10 +348,17 @@ def _process_one_product(product_id: str, url_a: str, url_b: str,
     source_b_label = ""
     if url_b:
         try:
-            page_b = scrape_page(url_b)
-            source_b_label = "link trang hãng"
+            if is_google_sheet_url(url_b):
+                page_b = load_google_sheet_source(url_b)
+                source_b_label = "Google Sheet tham khảo (Giá trị chốt)"
+            else:
+                page_b = scrape_page(url_b)
+                source_b_label = "link trang hãng"
         except Exception as exc:  # noqa: BLE001
-            result["warning_b"] = f"Lỗi tải trang hãng: {exc}"
+            result["warning_b"] = f"Lỗi tải nguồn đối chiếu: {exc}"
+        else:
+            if page_b.warnings:
+                result["warning_b"] = "; ".join(page_b.warnings)
     elif local_files_b:
         page_b = load_local_source(local_files_b)
         source_b_label = "file đã upload (" + ", ".join(
@@ -507,8 +515,11 @@ def main():
         "(cột Link hãng). Cột \"Link bài viết\" có thể để trống — hệ thống "
         "tự suy ra link bài viết TGDĐ/ĐMX từ ID; nếu suy ra bị lỗi (một số "
         "ID không tự resolve được), dán link bài viết đầy đủ vào cột đó để "
-        "chạy chắc chắn. Bấm \"Chạy QC hàng loạt\" để đối chiếu thông số kỹ "
-        "thuật + ảnh sản phẩm cho tất cả cùng lúc."
+        "chạy chắc chắn. Cột \"Link hãng\" cũng nhận link Google Sheet nội "
+        "bộ dạng \"Giá trị chốt\" (sheet phải chia sẻ Anyone with the link "
+        "can view) — hệ thống tự đọc cột \"Tên thuộc tính\"/\"Giá trị chốt\" "
+        "làm nguồn đối chiếu, không cần cào HTML. Bấm \"Chạy QC hàng loạt\" "
+        "để đối chiếu thông số kỹ thuật + ảnh sản phẩm cho tất cả cùng lúc."
     )
 
     _init_session_state()
@@ -528,7 +539,8 @@ def main():
                 width="large",
             ),
             "Link hãng": st.column_config.TextColumn(
-                "Link trang hãng / link spec (tuỳ chọn)", width="large"
+                "Link trang hãng / Google Sheet \"Giá trị chốt\" (tuỳ chọn)",
+                width="large",
             ),
         },
         key="batch_editor",
